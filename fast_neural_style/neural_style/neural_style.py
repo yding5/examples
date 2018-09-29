@@ -27,6 +27,87 @@ def check_paths(args):
         print(e)
         sys.exit(1)
 
+def evalByTrain(args):
+    device = torch.device("cuda" if args.cuda else "cpu")
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    transform = transforms.Compose([
+        transforms.Resize(args.image_size),
+        transforms.CenterCrop(args.image_size),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(255))
+    ])
+    #different dataset
+    train_dataset = datasets.ImageFolder(args.eval_dataset, transform)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size)
+
+
+    transformer = TransformerNet()
+    state_dict = torch.load(args.model)
+    # remove saved deprecated running_* keys in InstanceNorm from the checkpoint
+    for k in list(state_dict.keys()):
+         if re.search(r'in\d+\.running_(mean|var)$', k):
+            del state_dict[k]
+    transformer.load_state_dict(state_dict)
+    transformer.to(device)
+
+    #use loaded model instead
+    #transformer = TransformerNet().to(device)
+    
+    optimizer = Adam(transformer.parameters(), args.lr)
+    mse_loss = torch.nn.MSELoss()
+
+    vgg = Vgg16(requires_grad=False).to(device)
+    style_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(255))
+    ])
+    style = utils.load_image(args.style_image, size=args.style_size)
+    style = style_transform(style)
+    style = style.repeat(args.batch_size, 1, 1, 1).to(device)
+
+    features_style = vgg(utils.normalize_batch(style))
+    gram_style = [utils.gram_matrix(y) for y in features_style]
+    # eval once
+    for e in range(1):
+        transformer.eval()
+        agg_content_loss = 0.
+        agg_style_loss = 0.
+        count = 0
+        for batch_id, (x, _) in enumerate(train_loader):
+            n_batch = len(x)
+            count += n_batch
+            #optimizer.zero_grad()
+
+            x = x.to(device)
+            y = transformer(x)
+
+            y = utils.normalize_batch(y)
+            x = utils.normalize_batch(x)
+
+            features_y = vgg(y)
+            features_x = vgg(x)
+
+            content_loss = args.content_weight * mse_loss(features_y.relu2_2, features_x.relu2_2)
+
+            style_loss = 0.
+            for ft_y, gm_s in zip(features_y, gram_style):
+                gm_y = utils.gram_matrix(ft_y)
+                style_loss += mse_loss(gm_y, gm_s[:n_batch, :, :])
+            style_loss *= args.style_weight
+
+            total_loss = content_loss + style_loss
+            #total_loss.backward()
+            #optimizer.step()
+
+            agg_content_loss += content_loss.item()
+            agg_style_loss += style_loss.item()
+
+        mesg = "{}\tEpoch {}:\t[{}/{}]\tcontent: {:.6f}\tstyle: {:.6f}\ttotal: {:.6f}".format(time.ctime(), e + 1, count, len(train_dataset),agg_content_loss / (batch_id + 1),agg_style_loss / (batch_id + 1), (agg_content_loss + agg_style_loss) / (batch_id + 1) )
+        print(mesg)
+
 
 def train(args):
     device = torch.device("cuda" if args.cuda else "cpu")
@@ -118,6 +199,80 @@ def train(args):
 
     print("\nDone, trained model saved at", save_model_path)
 
+def evalulate(args):
+    
+    device = torch.device("cuda" if args.cuda else "cpu")
+
+    content_image = utils.load_image(args.content_image, scale=args.content_scale)
+    content_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(255))
+    ])
+    content_image = content_transform(content_image)
+    content_image = content_image.unsqueeze(0).to(device)
+
+    if args.model.endswith(".onnx"):
+        output = stylize_onnx_caffe2(content_image, args)
+    else:
+        with torch.no_grad():
+            style_model = TransformerNet()
+            state_dict = torch.load(args.model)
+            # remove saved deprecated running_* keys in InstanceNorm from the checkpoint
+            for k in list(state_dict.keys()):
+                if re.search(r'in\d+\.running_(mean|var)$', k):
+                    del state_dict[k]
+            style_model.load_state_dict(state_dict)
+            style_model.to(device)
+            if args.export_onnx:
+                assert args.export_onnx.endswith(".onnx"), "Export model file should end with .onnx"
+                output = torch.onnx._export(style_model, content_image, args.export_onnx).cpu()
+            else:
+                output = style_model(content_image).cpu()
+    
+
+    mse_loss = torch.nn.MSELoss()
+
+    vgg = Vgg16(requires_grad=False).to(device)
+    style_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(255))
+    ])
+    style = utils.load_image(args.style_image, size=args.style_size)
+    style = style_transform(style)
+    style = style.repeat(args.batch_size, 1, 1, 1).to(device)
+
+    features_style = vgg(utils.normalize_batch(style))
+    gram_style = [utils.gram_matrix(y) for y in features_style]
+
+    transformer.eval()
+    n_batch = len(x)
+    count += n_batch
+    optimizer.zero_grad()
+
+    x = x.to(device)
+    y = transformer(x)
+
+    y = utils.normalize_batch(y)
+    x = utils.normalize_batch(x)
+
+    features_y = vgg(y)
+    features_x = vgg(x)
+
+    content_loss = args.content_weight * mse_loss(features_y.relu2_2, features_x.relu2_2)
+
+    style_loss = 0.
+    for ft_y, gm_s in zip(features_y, gram_style):
+        gm_y = utils.gram_matrix(ft_y)
+        style_loss += mse_loss(gm_y, gm_s[:n_batch, :, :])
+    style_loss *= args.style_weight
+
+    total_loss = content_loss + style_loss
+    total_loss.backward()
+    optimizer.step()
+
+    agg_content_loss += content_loss.item()
+    agg_style_loss += style_loss.item()
+
 
 def stylize(args):
     device = torch.device("cuda" if args.cuda else "cpu")
@@ -178,9 +333,10 @@ def main():
                                   help="number of training epochs, default is 2")
     train_arg_parser.add_argument("--batch-size", type=int, default=4,
                                   help="batch size for training, default is 4")
-    train_arg_parser.add_argument("--dataset", type=str, required=True,
+    train_arg_parser.add_argument("--dataset", type=str, default = '~/Dataset/COCO/train2014',
                                   help="path to training dataset, the path should point to a folder "
                                        "containing another folder with all the training images")
+    train_arg_parser.add_argument("--eval-dataset", type=str, default='~/Dataset/COCO/val2014' )
     train_arg_parser.add_argument("--style-image", type=str, default="images/style-images/mosaic.jpg",
                                   help="path to style-image")
     train_arg_parser.add_argument("--save-model-dir", type=str, required=True,
@@ -206,6 +362,10 @@ def main():
     train_arg_parser.add_argument("--checkpoint-interval", type=int, default=2000,
                                   help="number of batches after which a checkpoint of the trained model will be created")
 
+    train_arg_parser.add_argument("--evalByTrain", type=bool, default=False,
+                                  help="whether train or eval by training function")
+    train_arg_parser.add_argument("--model", type=str,
+                                 help="used for eval by train")
     eval_arg_parser = subparsers.add_parser("eval", help="parser for evaluation/stylizing arguments")
     eval_arg_parser.add_argument("--content-image", type=str, required=True,
                                  help="path to content image you want to stylize")
@@ -230,10 +390,18 @@ def main():
         sys.exit(1)
 
     if args.subcommand == "train":
-        check_paths(args)
-        train(args)
-    else:
+        if args.evalByTrain:
+            evalByTrain(args)
+        else:
+            check_paths(args)
+            train(args)
+    else :
         stylize(args)
+    #elif args.subcommand == 'eval':
+    #    evalByTrain(args)
+    #else:
+    #    print("specify what you want to do: train, stylize, eval")
+    #    sys.exit(1)
 
 
 if __name__ == "__main__":

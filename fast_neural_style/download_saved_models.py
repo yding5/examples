@@ -1,6 +1,8 @@
 import os
 import zipfile
 
+import torch.utils
+
 from torch.utils.model_zoo import _download_url_to_file
 
 
