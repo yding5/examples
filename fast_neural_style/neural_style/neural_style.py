@@ -14,6 +14,7 @@ import torch.onnx
 
 import utils
 from transformer_net import TransformerNet
+from transformer_net import Quantized_TransformerNet
 from vgg import Vgg16
 
 
@@ -124,7 +125,10 @@ def train(args):
     train_dataset = datasets.ImageFolder(args.dataset, transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size)
 
-    transformer = TransformerNet().to(device)
+    if args.quantize:
+        transformer = Quantized_TransformerNet(args.bit).to(device)
+    else:
+        transformer = TransformerNet().to(device)
     optimizer = Adam(transformer.parameters(), args.lr)
     mse_loss = torch.nn.MSELoss()
 
@@ -364,6 +368,10 @@ def main():
 
     train_arg_parser.add_argument("--evalByTrain", type=bool, default=False,
                                   help="whether train or eval by training function")
+    train_arg_parser.add_argument("--quantize", type=bool, default=False,
+                                  help="whether train or eval by training function")
+    train_arg_parser.add_argument("--bit", type=int, default = 8,
+                                  help=" number of bit")
     train_arg_parser.add_argument("--model", type=str,
                                  help="used for eval by train")
     eval_arg_parser = subparsers.add_parser("eval", help="parser for evaluation/stylizing arguments")
